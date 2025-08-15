@@ -1,0 +1,750 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Chess } from 'chess.js';
+import { Chessboard } from 'react-chessboard';
+import {
+    getFirestore,
+    doc,
+    setDoc,
+    onSnapshot,
+    collection,
+    getDocs,
+    updateDoc,
+    getDoc,
+    query,
+    where
+} from 'firebase/firestore';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { v4 as uuidv4 } from 'uuid';
+
+// The Firebase and App ID variables are provided by the canvas environment
+const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+// Initialize Firebase
+let app, auth, db;
+try {
+    app = initializeApp(firebaseConfig);
+    db = getFirestore(app);
+    auth = getAuth(app);
+} catch (error) {
+    console.error("Firebase initialization error:", error);
+}
+
+// Helper to convert time in milliseconds to MM:SS format
+const formatTime = (time) => {
+    const minutes = Math.floor(time / 60000);
+    const seconds = Math.floor((time % 60000) / 1000);
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+};
+
+// Default profile picture URL
+const DEFAULT_PFP = "https://placehold.co/150x150/1e293b/d1d5db?text=User";
+
+// --- HomePage Component ---
+const HomePage = ({ myUserId, myUsername, myRating, myProfilePicture, setProfileName, profileName, setProfilePicture, profilePicture, updateProfile, leaderboard, setCurrentPage }) => {
+    return (
+        <div className="min-h-screen bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100 p-8 flex flex-col items-center font-sans">
+            <header className="w-full max-w-4xl text-center mb-8">
+                <h1 className="text-4xl font-bold">Welcome to EasyChess</h1>
+                <p className="mt-2 text-lg">Your next game is just a click away.</p>
+            </header>
+            <main className="flex flex-col lg:flex-row items-center lg:items-start gap-8 w-full max-w-4xl">
+                <div className="flex-1 w-full lg:w-auto">
+                    <div className="card w-full">
+                        <h2 className="text-xl font-bold">Your Profile</h2>
+                        <div className="flex items-center gap-4 mt-4">
+                            <img src={myProfilePicture} alt="Profile" className="w-16 h-16 rounded-full border-2 border-indigo-500"/>
+                            <div>
+                                <p className="text-lg font-bold">{myUsername}</p>
+                                <p className="text-sm text-gray-500 dark:text-gray-400">Rating: {myRating}</p>
+                                <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                                    Your unique ID: <code className="font-mono text-xs">{myUserId}</code>
+                                </p>
+                            </div>
+                        </div>
+                        
+                        <div className="mt-4 space-y-4">
+                            <div>
+                                <label htmlFor="profileName" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Username</label>
+                                <input
+                                    id="profileName"
+                                    type="text"
+                                    className="input w-full mt-1"
+                                    placeholder={myUsername}
+                                    value={profileName}
+                                    onChange={(e) => setProfileName(e.target.value)}
+                                />
+                            </div>
+                            <div>
+                                <label htmlFor="profilePicture" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Profile Picture URL</label>
+                                <input
+                                    id="profilePicture"
+                                    type="text"
+                                    className="input w-full mt-1"
+                                    placeholder="Enter image URL"
+                                    value={profilePicture}
+                                    onChange={(e) => setProfilePicture(e.target.value)}
+                                />
+                            </div>
+                            <button className="button w-full" onClick={updateProfile}>Update Profile</button>
+                        </div>
+                    </div>
+
+                    <div className="card w-full mt-4">
+                        <h2 className="text-xl font-bold">Start Playing</h2>
+                        <p className="mt-2 text-gray-500 dark:text-gray-400">Join a global game instantly.</p>
+                        <div className="mt-4">
+                            <button className="button w-full" onClick={() => setCurrentPage('game')}>
+                                Go to Game
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div className="w-full lg:w-96">
+                    <div className="card w-full">
+                        <h2 className="text-xl font-bold">Leaderboard</h2>
+                        <table className="leaderboard-table mt-4">
+                            <thead>
+                                <tr>
+                                    <th>Rank</th>
+                                    <th>Player</th>
+                                    <th>Rating</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {leaderboard.map((player, index) => (
+                                    <tr key={player.userId} className={player.userId === myUserId ? 'font-bold' : ''}>
+                                        <td>{index + 1}</td>
+                                        <td>
+                                            <div className="flex items-center gap-2">
+                                                <img src={player.profilePicture} alt="Profile" className="w-8 h-8 rounded-full"/>
+                                                <span>{player.username}</span>
+                                            </div>
+                                        </td>
+                                        <td>{player.rating}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </main>
+        </div>
+    );
+};
+
+// --- GamePage Component ---
+const GamePage = ({ myUsername, myProfilePicture, opponentUsername, opponentProfilePicture, isWhite, onDrop, board, gameStarted, whiteTime, blackTime, winner, findOrCreateGame, message, setCurrentPage, isMyTurn, customSquareStyles, onSquareClick }) => {
+    
+    const myTime = isWhite ? whiteTime : blackTime;
+    const opponentTime = isWhite ? blackTime : whiteTime;
+    const myPlayerName = myUsername || 'You';
+    const opponentPlayerName = opponentUsername || 'Opponent';
+    const myPlayerPic = myProfilePicture || DEFAULT_PFP;
+    const opponentPlayerPic = opponentProfilePicture || DEFAULT_PFP;
+
+    // Determine the game over message
+    let gameOverMessage = null;
+    if (winner) {
+        if (winner === 'Draw') {
+            gameOverMessage = 'Game is a Draw!';
+        } else {
+            const myColor = isWhite ? 'White' : 'Black';
+            if (winner === myColor) {
+                gameOverMessage = 'You Won!';
+            } else {
+                gameOverMessage = 'You Lost!';
+            }
+        }
+    }
+
+    return (
+        <div className="min-h-screen bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100 p-8 flex flex-col items-center font-sans">
+            <header className="w-full max-w-4xl text-center mb-8">
+                <h1 className="text-4xl font-bold">EasyChess</h1>
+                <p className="mt-2 text-lg">Play against a random opponent from anywhere in the world.</p>
+                <div className="mt-4">
+                    <button className="button button-secondary" onClick={() => setCurrentPage('home')}>
+                        Back to Home
+                    </button>
+                </div>
+            </header>
+            <main className="flex flex-col items-center gap-8 w-full max-w-4xl">
+                {/* Player Info (Opponent) */}
+                <div className="card w-full lg:w-96">
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-4">
+                            <img src={opponentPlayerPic} alt="Opponent Profile" className="w-12 h-12 rounded-full border-2 border-gray-400"/>
+                            <div className="flex flex-col">
+                                <span className="font-bold text-lg">{opponentPlayerName}</span>
+                                <span className="text-sm text-gray-500 dark:text-gray-400">{isWhite ? "Black" : "White"}</span>
+                            </div>
+                        </div>
+                        <span className="text-2xl font-bold rounded-md px-3 py-1 bg-gray-300 text-black dark:bg-gray-700 dark:text-gray-100">{formatTime(opponentTime)}</span>
+                    </div>
+                </div>
+
+                {/* Chessboard */}
+                <div className="w-full lg:w-96 flex flex-col items-center">
+                    <div className="shadow-lg rounded-lg overflow-hidden w-full">
+                        <Chessboard
+                            id="myBoard"
+                            position={board}
+                            onPieceDrop={onDrop}
+                            onSquareClick={onSquareClick}
+                            boardOrientation={isWhite ? 'white' : 'black'}
+                            customSquareStyles={customSquareStyles}
+                        />
+                    </div>
+                    {gameOverMessage && (
+                        <p className="text-xl font-bold mt-4 text-center">
+                            {gameOverMessage}
+                        </p>
+                    )}
+                </div>
+
+                {/* Player Info (You) */}
+                <div className="card w-full lg:w-96">
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-4">
+                            <img src={myPlayerPic} alt="My Profile" className="w-12 h-12 rounded-full border-2 border-indigo-500"/>
+                            <div className="flex flex-col">
+                                <span className="font-bold text-lg">{myPlayerName}</span>
+                                <span className="text-sm text-gray-500 dark:text-gray-400">{isWhite ? "White" : "Black"}</span>
+                            </div>
+                        </div>
+                        <span className="text-2xl font-bold rounded-md px-3 py-1 bg-gray-800 text-white dark:bg-gray-700 dark:text-gray-100">{formatTime(myTime)}</span>
+                    </div>
+                </div>
+
+                {/* Status Section */}
+                <div className="w-full lg:w-96 flex flex-col gap-4">
+                    {message && (
+                        <div className="bg-green-100 dark:bg-green-800 text-green-700 dark:text-green-200 p-3 rounded-md text-center">
+                            {message}
+                        </div>
+                    )}
+                    <div className="card w-full">
+                        <h2 className="text-xl font-bold">Game Status</h2>
+                        <div className="space-y-4 mt-4 text-center">
+                            {!gameStarted && (
+                                <button onClick={findOrCreateGame} className="button w-full">
+                                    Play
+                                </button>
+                            )}
+                            {gameStarted && (
+                                <div>
+                                    <p>Game is in progress.</p>
+                                    <p>Your turn: {isMyTurn ? "Yes" : "No"}</p>
+                                </div>
+                            )}
+                            <button className="button w-full" onClick={findOrCreateGame}>
+                                Start New Game
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </div>
+    );
+};
+
+
+// --- Main App Component ---
+export default function App() {
+    const [game, setGame] = useState(new Chess());
+    const [board, setBoard] = useState('start');
+    const [gameId, setGameId] = useState('');
+    const [opponentId, setOpponentId] = useState('');
+    const [myUserId, setMyUserId] = useState('');
+    const [myUsername, setMyUsername] = useState('');
+    const [myProfilePicture, setMyProfilePicture] = useState(DEFAULT_PFP);
+    const [myRating, setMyRating] = useState(null);
+    const [profileName, setProfileName] = useState('');
+    const [profilePicture, setProfilePicture] = useState('');
+    const [opponentUsername, setOpponentUsername] = useState('');
+    const [opponentProfilePicture, setOpponentProfilePicture] = useState(DEFAULT_PFP);
+    const [gameStarted, setGameStarted] = useState(false);
+    const [isMyTurn, setIsMyTurn] = useState(false);
+    const [isWhite, setIsWhite] = useState(true);
+    const [whiteTime, setWhiteTime] = useState(10 * 60 * 1000); // 10 minutes in ms
+    const [blackTime, setBlackTime] = useState(10 * 60 * 1000); // 10 minutes in ms
+    const [winner, setWinner] = useState(null);
+    const [authReady, setAuthReady] = useState(false);
+    const timerRef = useRef();
+    const [message, setMessage] = useState('');
+    const [leaderboard, setLeaderboard] = useState([]);
+    const [currentPage, setCurrentPage] = useState('home'); // New state for navigation
+    const [selectedSquare, setSelectedSquare] = useState(''); // State for the selected square
+    const [moveSquares, setMoveSquares] = useState({}); // State for legal move squares
+
+    // Authenticate and set up user state, including rating
+    useEffect(() => {
+        if (!app) {
+            console.error("Firebase app not initialized.");
+            setMessage('Error: Firebase app not initialized.');
+            return;
+        }
+
+        const setupAuth = async () => {
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        const userId = user.uid;
+                        setMyUserId(userId);
+
+                        // Check and initialize user profile and rating
+                        const leaderboardRef = doc(db, "artifacts", appId, "public", "data", "leaderboard", userId);
+                        const docSnap = await getDoc(leaderboardRef);
+
+                        if (docSnap.exists()) {
+                            const userData = docSnap.data();
+                            setMyUsername(userData.username);
+                            setMyRating(userData.rating);
+                            setMyProfilePicture(userData.profilePicture || DEFAULT_PFP);
+                            setProfileName(userData.username);
+                            setProfilePicture(userData.profilePicture || '');
+                        } else {
+                            const defaultUsername = `Player-${userId.substring(0, 4)}`;
+                            const defaultRating = 400;
+                            await setDoc(leaderboardRef, { username: defaultUsername, rating: defaultRating, userId: userId, profilePicture: DEFAULT_PFP });
+                            setMyUsername(defaultUsername);
+                            setMyRating(defaultRating);
+                            setMyProfilePicture(DEFAULT_PFP);
+                            setProfileName(defaultUsername);
+                        }
+                    }
+                    setAuthReady(true);
+                });
+            } catch (error) {
+                console.error("Authentication error:", error);
+                setMessage('Error: Authentication failed.');
+            }
+        };
+        setupAuth();
+    }, [auth]);
+
+    // Handle timer
+    useEffect(() => {
+        if (gameStarted && !winner) {
+            if (isMyTurn) {
+                timerRef.current = setInterval(() => {
+                    if (isWhite) {
+                        setWhiteTime(prev => prev - 1000);
+                    } else {
+                        setBlackTime(prev => prev - 1000);
+                    }
+                }, 1000);
+            }
+        }
+
+        // Check for timeout
+        if (whiteTime <= 0) {
+            setWinner('Black');
+        } else if (blackTime <= 0) {
+            setWinner('White');
+        }
+
+        return () => clearInterval(timerRef.current);
+    }, [gameStarted, isMyTurn, isWhite, whiteTime, blackTime, winner]);
+
+    // Firestore listener for game updates
+    useEffect(() => {
+        if (!authReady || !gameId) return;
+
+        const gameRef = doc(db, "artifacts", appId, "public", "data", "games", gameId);
+        const unsubscribe = onSnapshot(gameRef, async (docSnap) => {
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                setGame(new Chess(data.fen));
+                setBoard(data.fen);
+                setIsMyTurn(data.turn === (isWhite ? 'w' : 'b'));
+                setWhiteTime(data.whiteTime);
+                setBlackTime(data.blackTime);
+                setWinner(data.winner);
+
+                // Set opponent ID and fetch their info
+                if (data.playerWhiteId && data.playerBlackId) {
+                    const opponent = isWhite ? data.playerBlackId : data.playerWhiteId;
+                    if (opponent) {
+                        setOpponentId(opponent);
+                        const opponentDoc = await getDoc(doc(db, "artifacts", appId, "public", "data", "leaderboard", opponent));
+                        if (opponentDoc.exists()) {
+                            const opponentData = opponentDoc.data();
+                            setOpponentUsername(opponentData.username);
+                            setOpponentProfilePicture(opponentData.profilePicture || DEFAULT_PFP);
+                        }
+                    }
+                }
+                
+                // Start the game if both players are present
+                if (data.playerWhiteId && data.playerBlackId && !gameStarted) {
+                    setGameStarted(true);
+                    setMessage('Opponent found! Game started.');
+                }
+            } else {
+                setMessage("Game not found or has been removed.");
+                setGameStarted(false);
+                setGameId('');
+            }
+        }, (error) => {
+            console.error("Error listening to game:", error);
+            setMessage("Error listening to game updates.");
+        });
+
+        return () => unsubscribe();
+    }, [authReady, gameId, isWhite, gameStarted]);
+
+    // Firestore listener for the leaderboard
+    useEffect(() => {
+        if (!authReady) return;
+
+        const leaderboardCollectionRef = collection(db, "artifacts", appId, "public", "data", "leaderboard");
+        const unsubscribe = onSnapshot(leaderboardCollectionRef, async (querySnapshot) => {
+            const players = [];
+            querySnapshot.forEach((doc) => {
+                players.push(doc.data());
+            });
+
+            // Sort players by rating in descending order
+            players.sort((a, b) => b.rating - a.rating);
+            setLeaderboard(players);
+        }, (error) => {
+            console.error("Error listening to leaderboard:", error);
+        });
+
+        return () => unsubscribe();
+    }, [authReady]);
+
+    // Handle rating updates when a winner is declared
+    useEffect(() => {
+        const updateRatings = async () => {
+            if (!winner || winner === 'Draw' || !opponentId) return;
+
+            const myRatingDoc = await getDoc(doc(db, "artifacts", appId, "public", "data", "leaderboard", myUserId));
+            const opponentRatingDoc = await getDoc(doc(db, "artifacts", appId, "public", "data", "leaderboard", opponentId));
+
+            if (!myRatingDoc.exists() || !opponentRatingDoc.exists()) {
+                console.error("Could not find player ratings.");
+                return;
+            }
+
+            let myNewRating = myRatingDoc.data().rating;
+            let opponentNewRating = opponentRatingDoc.data().rating;
+
+            // Rating logic based on user's rules
+            const ratingChange = winner === (isWhite ? 'White' : 'Black') ? { win: 20, loss: -15 } : { win: -15, loss: 20 };
+
+            if (winner === (isWhite ? 'White' : 'Black')) { // I won
+                myNewRating += ratingChange.win;
+                opponentNewRating += ratingChange.loss;
+            } else { // I lost
+                myNewRating += ratingChange.loss;
+                opponentNewRating += ratingChange.win;
+            }
+
+            // Clamp ratings to the allowed range
+            myNewRating = Math.max(300, Math.min(2650, myNewRating));
+            opponentNewRating = Math.max(300, Math.min(2650, opponentNewRating));
+
+            // Update ratings in Firestore
+            await updateDoc(doc(db, "artifacts", appId, "public", "data", "leaderboard", myUserId), { rating: myNewRating });
+            await updateDoc(doc(db, "artifacts", appId, "public", "data", "leaderboard", opponentId), { rating: opponentNewRating });
+            setMyRating(myNewRating);
+        };
+
+        if (winner) {
+            updateRatings();
+        }
+    }, [winner, isWhite, myUserId, opponentId, db]);
+
+
+    // Update user profile and rating in Firestore
+    const updateProfile = async () => {
+        if (!profileName) return;
+        try {
+            const leaderboardRef = doc(db, "artifacts", appId, "public", "data", "leaderboard", myUserId);
+            const newProfilePic = profilePicture || DEFAULT_PFP;
+            await updateDoc(leaderboardRef, { username: profileName, profilePicture: newProfilePic });
+            setMyUsername(profileName);
+            setMyProfilePicture(newProfilePic);
+            setMessage("Profile updated successfully!");
+        } catch (error) {
+            console.error("Error updating profile:", error);
+            setMessage("Error updating profile.");
+        }
+    };
+
+    // Find an existing game or create a new one
+    const findOrCreateGame = async () => {
+        if (!myUserId) return;
+
+        setMessage("Looking for an opponent...");
+        setGame(new Chess());
+        setBoard('start');
+        setGameStarted(false);
+        setWhiteTime(10 * 60 * 1000);
+        setBlackTime(10 * 60 * 1000);
+        setWinner(null);
+        setGameId('');
+        setOpponentId('');
+        setIsMyTurn(false);
+        setOpponentUsername('');
+        setOpponentProfilePicture(DEFAULT_PFP);
+        setSelectedSquare(''); // Clear selected square
+        setMoveSquares({}); // Clear move squares
+
+        try {
+            // Look for an available game
+            const availableGamesQuery = query(
+                collection(db, "artifacts", appId, "public", "data", "games"),
+                where("playerBlackId", "==", null)
+            );
+            const querySnapshot = await getDocs(availableGamesQuery);
+
+            if (!querySnapshot.empty) {
+                // Join the first available game
+                const gameDoc = querySnapshot.docs[0];
+                const gameRef = doc(db, "artifacts", appId, "public", "data", "games", gameDoc.id);
+
+                if (gameDoc.data().playerWhiteId !== myUserId) {
+                    await updateDoc(gameRef, {
+                        playerBlackId: myUserId,
+                    });
+                    setGameId(gameDoc.id);
+                    setIsWhite(false);
+                    setMessage("Opponent found! Joining game...");
+                } else {
+                    // It's our own game, so we just wait
+                    setGameId(gameDoc.id);
+                    setIsWhite(true);
+                    setMessage("Waiting for an opponent to join...");
+                }
+            } else {
+                // No games available, create a new one
+                const newGameRef = doc(collection(db, "artifacts", appId, "public", "data", "games"));
+                const newGameId = newGameRef.id;
+
+                await setDoc(newGameRef, {
+                    fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+                    playerWhiteId: myUserId,
+                    playerBlackId: null,
+                    turn: 'w',
+                    whiteTime: 10 * 60 * 1000,
+                    blackTime: 10 * 60 * 1000,
+                    winner: null
+                });
+
+                setGameId(newGameId);
+                setIsWhite(true);
+                setMessage("Game created! Waiting for an opponent...");
+            }
+
+        } catch (error) {
+            console.error("Error finding or creating game:", error);
+            setMessage("Error finding or creating game.");
+        }
+    };
+
+    // Handle a piece drop event on the board
+    const onDrop = (sourceSquare, targetSquare) => {
+        if (!gameStarted || !isMyTurn || winner) return false;
+
+        const gameCopy = new Chess(game.fen());
+        const move = gameCopy.move({
+            from: sourceSquare,
+            to: targetSquare,
+            promotion: 'q'
+        });
+
+        if (move === null) return false;
+
+        const gameRef = doc(db, "artifacts", appId, "public", "data", "games", gameId);
+        const newTurn = gameCopy.turn();
+        let newWinner = null;
+        if (gameCopy.in_checkmate()) {
+            newWinner = isWhite ? 'White' : 'Black';
+        } else if (gameCopy.in_draw()) {
+            newWinner = 'Draw';
+        }
+
+        updateDoc(gameRef, {
+            fen: gameCopy.fen(),
+            turn: newTurn,
+            whiteTime: whiteTime,
+            blackTime: blackTime,
+            winner: newWinner,
+            playerWhiteId: isWhite ? myUserId : opponentId,
+            playerBlackId: !isWhite ? myUserId : opponentId
+        });
+
+        setGame(gameCopy);
+        setBoard(gameCopy.fen());
+        setIsMyTurn(false);
+        setSelectedSquare(''); // Clear selected square after a move
+        setMoveSquares({}); // Clear move squares after a move
+        return true;
+    };
+
+    // Handle square click to show legal moves
+    const onSquareClick = (square) => {
+        if (!gameStarted || !isMyTurn || winner) return;
+
+        // If a piece is already selected, try to move
+        if (selectedSquare) {
+            const moveResult = onDrop(selectedSquare, square);
+            if (moveResult) {
+                setSelectedSquare('');
+                setMoveSquares({});
+                return;
+            }
+        }
+
+        // Check if the clicked square contains a piece of the current player
+        const piece = game.get(square);
+        if (piece && ((isWhite && piece.color === 'w') || (!isWhite && piece.color === 'b'))) {
+            setSelectedSquare(square);
+            const moves = game.moves({ square: square, verbose: true });
+            const newMoveSquares = {};
+            moves.forEach(move => {
+                newMoveSquares[move.to] = { backgroundColor: 'rgba(0, 255, 0, 0.4)' };
+            });
+            setMoveSquares(newMoveSquares);
+        } else {
+            setSelectedSquare('');
+            setMoveSquares({});
+        }
+    };
+
+    // Style for the currently selected square and legal move squares
+    const customSquareStyles = {
+        ...moveSquares,
+        ...(selectedSquare && {
+            [selectedSquare]: { backgroundColor: 'rgba(255, 255, 0, 0.4)' }
+        })
+    };
+
+    // UI Rendering Logic
+    if (!authReady) {
+        return (
+            <div className="flex justify-center items-center h-screen bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100">
+                <p>Authenticating...</p>
+            </div>
+        );
+    }
+    
+    // Global styling
+    const globalStyles = `
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+        @import url('https://cdn.tailwindcss.com');
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .card {
+            background-color: #ffffff;
+            border-radius: 0.75rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            padding: 1.5rem;
+        }
+        .dark .card {
+            background-color: #1f2937;
+            box-shadow: 0 4px 6px -1-px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
+        }
+        .button {
+            background-color: #4f46e5;
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            font-weight: bold;
+            transition: background-color 0.2s;
+        }
+        .button:hover {
+            background-color: #4338ca;
+        }
+        .input {
+            background-color: #f3f4f6;
+            border-radius: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            border: 1px solid #d1d5db;
+        }
+        .dark .input {
+            background-color: #374151;
+            border-color: #4b5563;
+            color: white;
+        }
+        .button-secondary {
+            background-color: #e5e7eb;
+            color: #1f2937;
+        }
+        .dark .button-secondary {
+            background-color: #374151;
+            color: #e5e7eb;
+        }
+        .button-secondary:hover {
+            background-color: #d1d5db;
+        }
+        .dark .button-secondary:hover {
+            background-color: #4b5563;
+        }
+        .leaderboard-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .leaderboard-table th, .leaderboard-table td {
+            padding: 0.5rem;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        .dark .leaderboard-table th, .dark .leaderboard-table td {
+            border-bottom: 1px solid #4b5563;
+        }
+    `;
+
+    return (
+        <div className="min-h-screen bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100 p-8 flex flex-col items-center font-sans">
+            <style>{globalStyles}</style>
+            {currentPage === 'home' ? (
+                <HomePage
+                    myUserId={myUserId}
+                    myUsername={myUsername}
+                    myRating={myRating}
+                    myProfilePicture={myProfilePicture}
+                    setProfileName={setProfileName}
+                    profileName={profileName}
+                    setProfilePicture={setProfilePicture}
+                    profilePicture={profilePicture}
+                    updateProfile={updateProfile}
+                    leaderboard={leaderboard}
+                    setCurrentPage={setCurrentPage}
+                />
+            ) : (
+                <GamePage
+                    myUsername={myUsername}
+                    myProfilePicture={myProfilePicture}
+                    opponentUsername={opponentUsername}
+                    opponentProfilePicture={opponentProfilePicture}
+                    isWhite={isWhite}
+                    onDrop={onDrop}
+                    onSquareClick={onSquareClick}
+                    customSquareStyles={customSquareStyles}
+                    board={board}
+                    gameStarted={gameStarted}
+                    whiteTime={whiteTime}
+                    blackTime={blackTime}
+                    winner={winner}
+                    findOrCreateGame={findOrCreateGame}
+                    message={message}
+                    setCurrentPage={setCurrentPage}
+                    isMyTurn={isMyTurn}
+                />
+            )}
+        </div>
+    );
+}
